@@ -2,6 +2,10 @@
 
 import json
 import math
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -10,7 +14,7 @@ from shapely.geometry import mapping
 from shapely.strtree import STRtree
 
 from .drawings import write_pdf, write_svg
-from .models import PITCH, THICKNESS, Layout, board_thickness
+from .models import PITCH, THICKNESS, Layout, Panel, board_thickness
 from .native import mounting_holes
 from .spec import SpecError, ensure_ready
 from .underdesk import ASSEMBLY_TRAVEL
@@ -185,52 +189,143 @@ def _puzzle_support(layout: Layout) -> dict:
     }
 
 
-def export_layout(layout: Layout, output: str | Path) -> dict:
-    ensure_ready(layout.spec)
-    from build123d import Axis, Compound, export_step, export_stl
+def _build_panel_brep(panel: Panel) -> bytes:
+    """Build and validate once, then transport only exact native BREP, not Part ancestry."""
+    from build123d.persistence import serialize_shape
 
     from .cad import build_panel
+
+    data = serialize_shape(build_panel(panel).wrapped)
+    if not data:
+        raise ValueError("Empty panel BREP")
+    return data
+
+
+@contextmanager
+def _panel_shapes(panels: list[Panel], jobs: int):
+    if jobs == 1 or not panels:
+        from .cad import build_panel
+
+        yield (build_panel(panel) for panel in panels)
+        return
+
+    from build123d import Part
+    from build123d.persistence import deserialize_shape
+
+    pool = ProcessPoolExecutor(
+        max_workers=min(jobs, len(panels)),
+        mp_context=multiprocessing.get_context("spawn"),
+        # One panel per fresh process avoids accumulating CAD kernel state.
+        # Do not increase: CPython issue 115634 affects values greater than one.
+        max_tasks_per_child=1,
+    )
+    futures = []
+    try:
+        for panel in panels:
+            try:
+                futures.append(pool.submit(_build_panel_brep, panel))
+            except BrokenProcessPool as exc:
+                raise BrokenProcessPool(
+                    f"Panel worker pool failed while submitting {panel.id}: {exc}"
+                ) from exc
+
+        def shapes():
+            # Consume in layout order, regardless of worker completion order.
+            for panel, future in zip(panels, futures):
+                try:
+                    wrapped = deserialize_shape(future.result())
+                    if wrapped is None or wrapped.IsNull():
+                        raise ValueError("Empty panel BREP")
+                    # build_panel already validated this identical BREP in the worker.
+                    shape = Part(wrapped)
+                except BrokenProcessPool as exc:
+                    raise BrokenProcessPool(
+                        f"Panel worker pool failed while waiting for {panel.id}: {exc}"
+                    ) from exc
+                except Exception as exc:
+                    raise SpecError(f"Panel {panel.id} build failed: {exc}") from exc
+                yield shape
+
+        yield shapes()
+    finally:
+        # Cancellation affects pending work only. Join running workers even if a
+        # build or a parent-side export fails; this is deliberately not a timeout.
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _solid_volume(common) -> float:
+    """Sum all solid components, excluding face/edge-only boundary contact."""
+    from build123d import ShapeList
+
+    if common is None:
+        return 0.0
+    components = common if isinstance(common, ShapeList) else [common]
+    # Aggregate even sub-threshold pieces, retaining the original total-volume guard.
+    return sum(solid.volume for component in components for solid in component.solids())
+
+
+def _overlap_volume(a, b) -> float:
+    """Exact 3D common on native shapes, including all assembly locations."""
+    from build123d import Compound
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+
+    # Compound.intersect() in build123d can use untransformed assembly children.
+    common = BRepAlgoAPI_Common(a.wrapped, b.wrapped)
+    if not common.IsDone():
+        raise RuntimeError("Panel collision Boolean common failed")
+    wrapped = common.Shape()
+    return 0.0 if wrapped.IsNull() else _solid_volume(Compound.cast(wrapped))
+
+
+def export_layout(layout: Layout, output: str | Path, *, jobs: int = 1) -> dict:
+    if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs < 1:
+        raise ValueError("jobs must be a positive integer")
+    ensure_ready(layout.spec)
+    from build123d import Axis, Compound, export_step, export_stl
 
     support = _puzzle_support(layout) if layout.spec.joints.style == "under_desk_puzzle" else None
     path = Path(output)
     prepare_output(path)
     panel_records = []
     assembly = []
-    for panel in layout.panels:
-        print(f"Building {panel.id}: {len(panel.cells)} cells", flush=True)
-        shape = build_panel(panel)
-        shape.label = panel.id
-        assembly.append(shape)
-        placement = panel.placement
-        printed = shape.rotate(Axis.Z, placement.rotation).translate((placement.x, placement.y, 0))
-        if not export_step(printed, path / f"{panel.id}.step"):
-            raise SpecError(f"STEP export failed for {panel.id}")
-        if not export_stl(printed, path / f"{panel.id}.stl", tolerance=0.01, angular_tolerance=0.1):
-            raise SpecError(f"STL export failed for {panel.id}")
-        panel_records.append(
-            {
-                "id": panel.id,
-                "footprint": mapping(panel.footprint),
-                "installation_bounds": list(panel.footprint.bounds),
-                "cells": [{"ix": c.ix, "iy": c.iy, "x": c.x, "y": c.y} for c in panel.cells],
-                "mounting_holes": [{"x": x, "y": y} for x, y in mounting_holes(panel)],
-                "print_placement": {
-                    "rotation": placement.rotation,
-                    "x": placement.x,
-                    "y": placement.y,
-                },
-                "volume_mm3": shape.volume,
-                "step": f"{panel.id}.step",
-                "stl": f"{panel.id}.stl",
-            }
-        )
+    with _panel_shapes(layout.panels, jobs) as shapes:
+        for panel in layout.panels:
+            print(f"Building {panel.id}: {len(panel.cells)} cells", flush=True)
+            shape = next(shapes)
+            shape.label = panel.id
+            assembly.append(shape)
+            placement = panel.placement
+            printed = shape.rotate(Axis.Z, placement.rotation).translate((placement.x, placement.y, 0))
+            if not export_step(printed, path / f"{panel.id}.step"):
+                raise SpecError(f"STEP export failed for {panel.id}")
+            if not export_stl(printed, path / f"{panel.id}.stl", tolerance=0.01, angular_tolerance=0.1):
+                raise SpecError(f"STL export failed for {panel.id}")
+            panel_records.append(
+                {
+                    "id": panel.id,
+                    "footprint": mapping(panel.footprint),
+                    "installation_bounds": list(panel.footprint.bounds),
+                    "cells": [{"ix": c.ix, "iy": c.iy, "x": c.x, "y": c.y} for c in panel.cells],
+                    "mounting_holes": [{"x": x, "y": y} for x, y in mounting_holes(panel)],
+                    "print_placement": {
+                        "rotation": placement.rotation,
+                        "x": placement.x,
+                        "y": placement.y,
+                    },
+                    "volume_mm3": shape.volume,
+                    "step": f"{panel.id}.step",
+                    "stl": f"{panel.id}.stl",
+                }
+            )
     if not panel_records:
         raise SpecError("No printable panels")
     if layout.spec.joints.style in {"wall", "under_desk", "under_desk_puzzle"}:
         tree = STRtree([p.footprint for p in layout.panels])
         for i, panel in enumerate(layout.panels):
             for k in tree.query(panel.footprint, predicate="intersects"):
-                if k > i and assembly[i].volume - assembly[i].cut(assembly[k]).volume > 1e-5:
+                if k > i and _overlap_volume(assembly[i], assembly[k]) > 1e-5:
                     raise SpecError(f"Connectors collide: {panel.id}/{layout.panels[k].id}")
     if not export_step(Compound(children=assembly), path / "assembly.step"):
         raise SpecError("Assembly STEP export failed")
