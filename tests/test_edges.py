@@ -1,19 +1,53 @@
 """Real native stock, assembly and layer geometry for supporting edge lips."""
 from itertools import combinations
+from math import isclose
 
 import pytest
 from build123d import Compound, extrude
 from shapely.geometry import LineString, box
 
-from opengrid.cad import _footprint_face, _socket_cutter, build_panel
+from opengrid.cad import _apply_edge_lips, _footprint_face, _socket_cutter, build_panel
 from opengrid.edges import edge_reservation, lip_sections, lip_solids
 from opengrid.layout import plan_installation
-from opengrid.models import InstallationSpec, JointSpec, PrinterSpec
+from opengrid.models import THICKNESS, InstallationSpec, JointSpec, PrinterSpec
 
 
 def overlap(a, b):
     return a.volume - a.cut(b).volume
 
+
+def _sequential_edge_lips(base, panel):
+    for edge in panel.edges:
+        addition, cut = lip_solids(edge)
+        base = base.fuse(addition) if edge.male_panel == panel.id else base.cut(cut)
+    return base
+
+
+def test_batched_edge_lips_match_sequential_mixed_t_junction_geometry():
+    layout = plan_installation(InstallationSpec(
+        "mixed",
+        box(0, 0, 224, 224),
+        printer=PrinterSpec(max_panel_span=112),
+        joints=JointSpec(style="under_desk_puzzle"),
+    ))
+    panel = next(
+        p
+        for p in layout.panels
+        if "".join("M" if edge.male_panel == p.id else "F" for edge in p.edges)
+        == "MMMMFFFFMMMM"
+    )
+    assert len(layout.joints) > 0
+    footprint = panel.base_footprint if panel.base_footprint is not None else panel.footprint
+    base = extrude(_footprint_face(footprint), amount=THICKNESS, dir=(0, 0, 1))
+
+    sequential = _sequential_edge_lips(base, panel)
+    batched = _apply_edge_lips(base, panel)
+
+    assert batched.is_valid
+    assert len(batched.solids()) == 1
+    assert isclose(batched.volume, sequential.volume, rel_tol=1e-9, abs_tol=1e-5)
+    assert sequential.cut(batched).volume < 1e-5
+    assert batched.cut(sequential).volume < 1e-5
 
 @pytest.mark.parametrize("style", ["wall", "under_desk", "under_desk_puzzle"])
 @pytest.mark.parametrize("clearance", [0, 0.05, 0.1])

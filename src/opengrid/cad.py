@@ -107,6 +107,34 @@ def _single_volume(shape: object, *, context: str):
     return shape
 
 
+def _apply_edge_lips(base, panel: Panel):
+    """Apply supporting lips in ordered batches without changing edge semantics.
+
+    A panel can have mixed male and female interfaces (notably at T junctions).
+    Only consecutive additions or cuts are batched so a later tongue is still
+    applied after any preceding pocket, as in the legacy edge-by-edge sequence.
+    """
+    if not panel.edges:
+        return base
+
+    from .edges import lip_solids
+
+    pending = []
+    pending_is_addition = None
+    for edge in panel.edges:
+        addition, cut = lip_solids(edge)
+        is_addition = edge.male_panel == panel.id
+        if pending and is_addition != pending_is_addition:
+            base = base.fuse(*pending) if pending_is_addition else base.cut(*pending)
+            pending.clear()
+        pending.append(addition if is_addition else cut)
+        pending_is_addition = is_addition
+
+    if pending:
+        base = base.fuse(*pending) if pending_is_addition else base.cut(*pending)
+    return base
+
+
 def build_panel(panel: Panel):
     """Build one native Lite panel in installation coordinates.
 
@@ -137,12 +165,7 @@ def build_panel(panel: Panel):
             base = base.fuse(posed(addition))
         if cut is not None:
             base = base.cut(posed(cut))
-    if panel.edges:
-        from .edges import lip_solids
-
-        for edge in panel.edges:
-            addition, cut = lip_solids(edge)
-            base = base.fuse(addition) if edge.male_panel == panel.id else base.cut(cut)
+    base = _apply_edge_lips(base, panel)
     cutter = _socket_cutter()
     cutters = [cutter.moved(Location((cell.x, cell.y, 0.0))) for cell in panel.cells]
     result = base.cut(*cutters) if cutters else base
