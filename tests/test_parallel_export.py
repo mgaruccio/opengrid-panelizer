@@ -43,10 +43,16 @@ def document(board="lite", width=168):
 def _record_build(panel):
     # Spawn imports the real worker anew; only this test wrapper records its PID.
     Path(panel._pid_path).write_text(str(os.getpid()))
+    from OCP.OSD import OSD_Parallel, OSD_ThreadPool
+
+    pool = OSD_ThreadPool.DefaultPool_s()
+    Path(panel._pid_path + ".threads.json").write_text(json.dumps(
+        [pool.NbThreads(), pool.NbDefaultThreadsToLaunch(), OSD_Parallel.ToUseOcctThreads_s()]
+    ))
     return exporter._build_panel_brep(panel)
 
 
-def _crash_build(panel):
+def _crash_build(*_args):
     os._exit(7)
 
 
@@ -153,6 +159,11 @@ def test_native_binary_transport_preserves_nonidentity_location(tmp_path, monkey
 
 
 def test_every_panel_gets_a_fresh_spawned_process(tmp_path, monkeypatch):
+    from OCP.OSD import OSD_Parallel, OSD_ThreadPool
+
+    parent_pool = OSD_ThreadPool.DefaultPool_s()
+    parent_threads = (parent_pool.NbThreads(), parent_pool.NbDefaultThreadsToLaunch(),
+                      OSD_Parallel.ToUseOcctThreads_s())
     layout = plan_installation(parse_spec(document(width=280)))
     assert len(layout.panels) == 5
     for panel in layout.panels:
@@ -164,6 +175,13 @@ def test_every_panel_gets_a_fresh_spawned_process(tmp_path, monkeypatch):
     assert all(v > 0 for v in volumes)
     pids = {int(Path(panel._pid_path).read_text()) for panel in layout.panels}
     assert len(pids) == 5 and os.getpid() not in pids
+    threads = max(1, (os.cpu_count() or 1) // 2)
+    for panel in layout.panels:
+        assert json.loads(Path(panel._pid_path + ".threads.json").read_text()) == [
+            threads, threads, True
+        ]
+    assert (parent_pool.NbThreads(), parent_pool.NbDefaultThreadsToLaunch(),
+            OSD_Parallel.ToUseOcctThreads_s()) == parent_threads
     assert {child.pid for child in multiprocessing.active_children()} == before
 
 
@@ -181,6 +199,31 @@ def test_worker_error_has_panel_context_no_manifest_and_joins_workers(tmp_path):
     assert {child.pid for child in multiprocessing.active_children()} == before
 
 
+def test_early_assembly_writer_failure_exits_without_queue_shutdown_hang(tmp_path):
+    script = tmp_path / "writer_failure.py"
+    output = tmp_path / "failed-writer"
+    script.write_text(
+        "from opengrid import export as exporter\n"
+        "from opengrid.layout import plan_installation\n"
+        "from opengrid.spec import from_dict, SpecError\n"
+        "def fail_writer(queue, dest, errors):\n"
+        "    errors.put('forced writer failure')\n"
+        "if __name__ == '__main__':\n"
+        "    exporter._stream_assembly = fail_writer\n"
+        f"    layout = plan_installation(from_dict({document()!r}))\n"
+        "    try:\n"
+        f"        exporter.export_layout(layout, {str(output)!r}, jobs=2)\n"
+        "    except SpecError as exc:\n"
+        "        assert 'forced writer failure' in str(exc), str(exc)\n"
+        "    else:\n"
+        "        raise AssertionError('writer failure was ignored')\n"
+    )
+    process = subprocess.run([sys.executable, str(script)], capture_output=True,
+                             text=True, timeout=45, check=False)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert not (output / "manifest.json").exists()
+
+
 def test_parent_export_error_joins_workers(tmp_path, monkeypatch):
     import build123d
 
@@ -189,7 +232,7 @@ def test_parent_export_error_joins_workers(tmp_path, monkeypatch):
     monkeypatch.setattr(build123d, "export_step", lambda *args: False)
     output = tmp_path / "failed"
     with pytest.raises(SpecError, match=f"STEP export failed for {layout.panels[0].id}"):
-        exporter.export_layout(layout, output, jobs=2)
+        exporter.export_layout(layout, output, jobs=1)
     assert not (output / "manifest.json").exists()
     assert {child.pid for child in multiprocessing.active_children()} == before
 
@@ -198,7 +241,7 @@ def test_broken_pool_is_reported_at_cli_boundary_and_joined(tmp_path, monkeypatc
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps(document()))
     before = {child.pid for child in multiprocessing.active_children()}
-    monkeypatch.setattr(exporter, "_build_panel_brep", _crash_build)
+    monkeypatch.setattr(exporter, "_build_and_export", _crash_build)
     output = tmp_path / "failed"
     assert main(["generate", "--spec", str(spec), "--output", str(output), "--jobs", "2"]) == 2
     error = capsys.readouterr().err
@@ -245,13 +288,25 @@ def test_common_preserves_assembly_child_locations():
     assert exporter._overlap_volume(moved, moved) == pytest.approx(1)
 
 
-def test_colliding_panels_keep_guard_and_failure_context(tmp_path):
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_colliding_panels_keep_guard_and_failure_context(tmp_path, jobs):
     layout = plan_installation(parse_spec(document(width=112)))
     layout.panels[1] = replace(layout.panels[0], id=layout.panels[1].id)
     output = tmp_path / "collision"
     with pytest.raises(SpecError, match="Connectors collide: P001/P002"):
-        exporter.export_layout(layout, output)
+        exporter.export_layout(layout, output, jobs=jobs)
     assert not (output / "manifest.json").exists()
+
+
+def test_parallel_collision_batch_reports_later_pair_and_joins_workers():
+    layout = plan_installation(parse_spec(document(width=280)))
+    assert len(exporter._connector_pairs(layout.panels)) > 2
+    shapes = [Box(1, 1, 1).translate((10 * i, 0, 0)) for i in range(5)]
+    shapes[-1] = shapes[-2]
+    before = {child.pid for child in multiprocessing.active_children()}
+    with pytest.raises(SpecError, match="Connectors collide: P004/P005"):
+        exporter._reject_connector_collisions(layout.panels, shapes, jobs=2)
+    assert {child.pid for child in multiprocessing.active_children()} == before
 
 
 @pytest.mark.parametrize("board", ["lite", "full"])
@@ -292,6 +347,7 @@ def test_public_cli_serial_parallel_geometry_and_manifest_parity(tmp_path, board
     assembly = import_step(parallel / "assembly.step")
     serial_assembly = import_step(serial / "assembly.step")
     assert assembly.is_valid and len(assembly.solids()) == 3
+    assert [child.label for child in assembly.children] == [p.id for p in layout.panels]
     assert assembly.cut(serial_assembly).volume < 1e-5
     assert serial_assembly.cut(assembly).volume < 1e-5
     ET.parse(parallel / "assembly.svg")

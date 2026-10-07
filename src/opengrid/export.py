@@ -3,6 +3,7 @@
 import json
 import math
 import multiprocessing
+import os
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
@@ -201,8 +202,46 @@ def _build_panel_brep(panel: Panel) -> bytes:
     return data
 
 
+def _write_print_files(shape, panel: Panel, output: Path) -> None:
+    """Write print-frame STEP/STL. The returned solid stays in installation coordinates."""
+    from build123d import Axis, export_step, export_stl
+
+    placement = panel.placement
+    printed = shape.rotate(Axis.Z, placement.rotation).translate((placement.x, placement.y, 0))
+    printed.label = panel.id
+    if not export_step(printed, output / f"{panel.id}.step"):
+        raise SpecError(f"STEP export failed for {panel.id}")
+    if not export_stl(printed, output / f"{panel.id}.stl", tolerance=0.01, angular_tolerance=0.1):
+        raise SpecError(f"STL export failed for {panel.id}")
+
+
+def _build_and_export(panel: Panel, output: str) -> bytes:
+    """Build and export one panel in a fresh process; return exact native BREP."""
+    from build123d.persistence import serialize_shape
+
+    from .cad import build_panel
+
+    shape = build_panel(panel)
+    _write_print_files(shape, panel, Path(output))
+    data = serialize_shape(shape.wrapped)
+    if not data:
+        raise ValueError("Empty panel BREP")
+    return data
+
+
+def _init_panel_worker(threads: int) -> None:
+    """Keep nested OCCT boolean parallelism within this worker's CPU share."""
+    from OCP.OSD import OSD_Parallel, OSD_ThreadPool
+
+    OSD_Parallel.SetUseOcctThreads_s(True)
+    pool = OSD_ThreadPool.DefaultPool_s(threads)
+    # build123d imports may already have created the pool. No CAD jobs run yet.
+    pool.Init(threads)
+    pool.SetNbDefaultThreadsToLaunch(threads)
+
+
 @contextmanager
-def _panel_shapes(panels: list[Panel], jobs: int):
+def _panel_shapes(panels: list[Panel], jobs: int, output: Path | None = None):
     if jobs == 1 or not panels:
         from .cad import build_panel
 
@@ -212,8 +251,11 @@ def _panel_shapes(panels: list[Panel], jobs: int):
     from build123d import Part
     from build123d.persistence import deserialize_shape
 
+    workers = min(jobs, len(panels))
     pool = ProcessPoolExecutor(
-        max_workers=min(jobs, len(panels)),
+        max_workers=workers,
+        initializer=_init_panel_worker,
+        initargs=(max(1, (os.cpu_count() or 1) // workers),),
         mp_context=multiprocessing.get_context("spawn"),
         # One panel per fresh process avoids accumulating CAD kernel state.
         # Do not increase: CPython issue 115634 affects values greater than one.
@@ -223,7 +265,10 @@ def _panel_shapes(panels: list[Panel], jobs: int):
     try:
         for panel in panels:
             try:
-                futures.append(pool.submit(_build_panel_brep, panel))
+                if output is None:
+                    futures.append(pool.submit(_build_panel_brep, panel))
+                else:
+                    futures.append(pool.submit(_build_and_export, panel, str(output)))
             except BrokenProcessPool as exc:
                 raise BrokenProcessPool(
                     f"Panel worker pool failed while submitting {panel.id}: {exc}"
@@ -233,15 +278,19 @@ def _panel_shapes(panels: list[Panel], jobs: int):
             # Consume in layout order, regardless of worker completion order.
             for panel, future in zip(panels, futures):
                 try:
-                    wrapped = deserialize_shape(future.result())
+                    data = future.result()
+                    wrapped = deserialize_shape(data)
                     if wrapped is None or wrapped.IsNull():
                         raise ValueError("Empty panel BREP")
                     # build_panel already validated this identical BREP in the worker.
                     shape = Part(wrapped)
+                    shape._transport = data
                 except BrokenProcessPool as exc:
                     raise BrokenProcessPool(
                         f"Panel worker pool failed while waiting for {panel.id}: {exc}"
                     ) from exc
+                except SpecError:
+                    raise
                 except Exception as exc:
                     raise SpecError(f"Panel {panel.id} build failed: {exc}") from exc
                 yield shape
@@ -249,11 +298,10 @@ def _panel_shapes(panels: list[Panel], jobs: int):
         yield shapes()
     finally:
         # Cancellation affects pending work only. Join running workers even if a
-        # build or a parent-side export fails; this is deliberately not a timeout.
+        # build or export fails; this is deliberately not a timeout.
         for future in futures:
             future.cancel()
         pool.shutdown(wait=True, cancel_futures=True)
-
 
 def _solid_volume(common) -> float:
     """Sum all solid components, excluding face/edge-only boundary contact."""
@@ -279,58 +327,196 @@ def _overlap_volume(a, b) -> float:
     return 0.0 if wrapped.IsNull() else _solid_volume(Compound.cast(wrapped))
 
 
+
+def _connector_pairs(panels: list[Panel]) -> list[tuple[int, int]]:
+    tree = STRtree([panel.footprint for panel in panels])
+    pairs = []
+    for i, panel in enumerate(panels):
+        for raw in tree.query(panel.footprint, predicate="intersects"):
+            k = int(raw)
+            if k > i:
+                pairs.append((i, k))
+    return pairs
+
+
+def _transported_overlap(payload: tuple[bytes, bytes]) -> float:
+    from build123d import Part
+    from build123d.persistence import deserialize_shape
+
+    left, right = payload
+    return _overlap_volume(Part(deserialize_shape(left)), Part(deserialize_shape(right)))
+
+
+def _reject_connector_collisions(panels: list[Panel], shapes, jobs: int) -> None:
+    """Reject connector solid overlap. Parallel checks stay inside the jobs cap."""
+    pairs = _connector_pairs(panels)
+    if not pairs:
+        return
+    if jobs == 1:
+        for i, k in pairs:
+            if _overlap_volume(shapes[i], shapes[k]) > 1e-5:
+                raise SpecError(f"Connectors collide: {panels[i].id}/{panels[k].id}")
+        return
+    from build123d.persistence import serialize_shape
+
+    encoded = []
+    for shape in shapes:
+        data = getattr(shape, "_transport", None) or serialize_shape(shape.wrapped)
+        encoded.append(data)
+    pool = ProcessPoolExecutor(
+        max_workers=min(jobs, len(pairs)),
+        mp_context=multiprocessing.get_context("spawn"),
+        max_tasks_per_child=1,
+    )
+    try:
+        volumes = pool.map(
+            _transported_overlap,
+            [(encoded[i], encoded[k]) for i, k in pairs],
+            # One bounded batch per fresh process avoids reimporting CAD per pair.
+            chunksize=math.ceil(len(pairs) / jobs),
+        )
+        for (i, k), volume in zip(pairs, volumes):
+            if volume > 1e-5:
+                raise SpecError(f"Connectors collide: {panels[i].id}/{panels[k].id}")
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _stream_assembly(queue, dest: str, errors) -> None:
+    """Prepare named installation solids as they arrive; transfer STEP only once."""
+    try:
+        from build123d import Part
+        from build123d.build_enums import PrecisionMode, Unit
+        from build123d.exporters3d import UNITS_PER_METER
+        from build123d.persistence import deserialize_shape
+        from OCP.IFSelect import IFSelect_RetDone
+        from OCP.Interface import Interface_Static
+        from OCP.Message import Message, Message_Gravity
+        from OCP.STEPCAFControl import STEPCAFControl_Writer
+        from OCP.STEPControl import STEPControl_AsIs
+        from OCP.TCollection import TCollection_ExtendedString
+        from OCP.TDataStd import TDataStd_Name
+        from OCP.TDocStd import TDocStd_Document
+        from OCP.XCAFApp import XCAFApp_Application
+        from OCP.XCAFDoc import XCAFDoc_DocumentTool
+
+        doc = TDocStd_Document(TCollection_ExtendedString("XmlOcaf"))
+        application = XCAFApp_Application.GetApplication_s()
+        application.NewDocument(TCollection_ExtendedString("MDTV-XCAF"), doc)
+        application.InitDocument(doc)
+        XCAFDoc_DocumentTool.SetLengthUnit_s(doc, 1 / UNITS_PER_METER[Unit.MM])
+        tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+        writer = STEPCAFControl_Writer()
+        writer.SetNameMode(True)
+        Interface_Static.SetIVal_s("write.surfacecurve.mode", 1)
+        Interface_Static.SetIVal_s("write.precision.mode", PrecisionMode.AVERAGE.value)
+        messenger = Message.DefaultMessenger_s()
+        for printer in messenger.Printers():
+            printer.SetTraceLevel(Message_Gravity.Message_Fail)
+        while True:
+            item = queue.get()
+            if item is None:
+                break
+            data, label = item
+            wrapped = deserialize_shape(data)
+            if wrapped is None or wrapped.IsNull():
+                raise ValueError("Empty panel BREP")
+            shape = Part(wrapped)
+            shape.label = label
+            stored = tool.AddShape(shape.wrapped, False)
+            if label:
+                TDataStd_Name.Set_s(stored, TCollection_ExtendedString(label))
+        # Transfer the complete named document once: per-label transfers repeat
+        # STEP bookkeeping and cost more than the early-start overlap saves.
+        if not writer.Transfer(doc, STEPControl_AsIs):
+            raise RuntimeError("Assembly STEP export failed")
+        if writer.Write(dest) != IFSelect_RetDone:
+            raise RuntimeError("Assembly STEP export failed")
+    except Exception as exc:
+        errors.put(f"{type(exc).__name__}: {exc}")
+        raise
+
+
 def export_layout(layout: Layout, output: str | Path, *, jobs: int = 1) -> dict:
     if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs < 1:
         raise ValueError("jobs must be a positive integer")
     ensure_ready(layout.spec)
-    from build123d import Axis, Compound, export_step, export_stl
-
     support = _puzzle_support(layout) if layout.spec.joints.style == "under_desk_puzzle" else None
     path = Path(output)
     prepare_output(path)
     panel_records = []
     assembly = []
-    with _panel_shapes(layout.panels, jobs) as shapes:
-        for panel in layout.panels:
-            print(f"Building {panel.id}: {len(panel.cells)} cells", flush=True)
-            shape = next(shapes)
-            shape.label = panel.id
-            assembly.append(shape)
-            placement = panel.placement
-            printed = shape.rotate(Axis.Z, placement.rotation).translate((placement.x, placement.y, 0))
-            if not export_step(printed, path / f"{panel.id}.step"):
-                raise SpecError(f"STEP export failed for {panel.id}")
-            if not export_stl(printed, path / f"{panel.id}.stl", tolerance=0.01, angular_tolerance=0.1):
-                raise SpecError(f"STL export failed for {panel.id}")
-            panel_records.append(
-                {
-                    "id": panel.id,
-                    "footprint": mapping(panel.footprint),
-                    "installation_bounds": list(panel.footprint.bounds),
-                    "cells": [{"ix": c.ix, "iy": c.iy, "x": c.x, "y": c.y} for c in panel.cells],
-                    "mounting_holes": [{"x": x, "y": y} for x, y in mounting_holes(panel)],
-                    "print_placement": {
-                        "rotation": placement.rotation,
-                        "x": placement.x,
-                        "y": placement.y,
-                    },
-                    "volume_mm3": shape.volume,
-                    "step": f"{panel.id}.step",
-                    "stl": f"{panel.id}.stl",
-                }
-            )
-    if not panel_records:
-        raise SpecError("No printable panels")
-    if layout.spec.joints.style in {"wall", "under_desk", "under_desk_puzzle"}:
-        tree = STRtree([p.footprint for p in layout.panels])
-        for i, panel in enumerate(layout.panels):
-            for k in tree.query(panel.footprint, predicate="intersects"):
-                if k > i and _overlap_volume(assembly[i], assembly[k]) > 1e-5:
-                    raise SpecError(f"Connectors collide: {panel.id}/{layout.panels[k].id}")
-    if not export_step(Compound(children=assembly), path / "assembly.step"):
-        raise SpecError("Assembly STEP export failed")
-    write_svg(layout.spec, path / "assembly.svg", layout)
-    write_pdf(layout.spec, path / "assembly.pdf", layout)
+    assembly_proc = None
+    assembly_queue = None
+    assembly_errors = None
+    if jobs > 1 and layout.panels:
+        context = multiprocessing.get_context("spawn")
+        assembly_queue = context.Queue()
+        assembly_errors = context.Queue()
+        assembly_proc = context.Process(
+            target=_stream_assembly,
+            args=(assembly_queue, str(path / "assembly.step"), assembly_errors),
+        )
+        assembly_proc.start()
+    try:
+        with _panel_shapes(layout.panels, jobs, path if jobs > 1 else None) as shapes:
+            for panel in layout.panels:
+                print(f"Building {panel.id}: {len(panel.cells)} cells", flush=True)
+                shape = next(shapes)
+                shape.label = panel.id
+                assembly.append(shape)
+                if jobs == 1:
+                    _write_print_files(shape, panel, path)
+                elif assembly_queue is not None:
+                    assembly_queue.put((shape._transport, panel.id))
+                placement = panel.placement
+                panel_records.append(
+                    {
+                        "id": panel.id,
+                        "footprint": mapping(panel.footprint),
+                        "installation_bounds": list(panel.footprint.bounds),
+                        "cells": [{"ix": c.ix, "iy": c.iy, "x": c.x, "y": c.y} for c in panel.cells],
+                        "mounting_holes": [{"x": x, "y": y} for x, y in mounting_holes(panel)],
+                        "print_placement": {
+                            "rotation": placement.rotation,
+                            "x": placement.x,
+                            "y": placement.y,
+                        },
+                        "volume_mm3": shape.volume,
+                        "step": f"{panel.id}.step",
+                        "stl": f"{panel.id}.stl",
+                    }
+                )
+        if not panel_records:
+            raise SpecError("No printable panels")
+        if assembly_queue is not None:
+            assembly_queue.put(None)
+        if layout.spec.joints.style in {"wall", "under_desk", "under_desk_puzzle"}:
+            _reject_connector_collisions(layout.panels, assembly, jobs)
+        write_svg(layout.spec, path / "assembly.svg", layout)
+        write_pdf(layout.spec, path / "assembly.pdf", layout)
+        if jobs == 1:
+            from build123d import Compound, export_step
+
+            if not export_step(Compound(children=assembly), path / "assembly.step"):
+                raise SpecError("Assembly STEP export failed")
+        elif assembly_proc is not None:
+            assembly_proc.join()
+            if not assembly_errors.empty():
+                raise SpecError(f"Assembly STEP export failed: {assembly_errors.get()}")
+            if assembly_proc.exitcode != 0:
+                raise SpecError("Assembly STEP export failed")
+    finally:
+        if assembly_proc is not None:
+            if assembly_proc.is_alive():
+                assembly_proc.terminate()
+            assembly_proc.join()
+        for queue in (assembly_queue, assembly_errors):
+            if queue is not None:
+                # A failed writer may leave BREP bytes buffered with no reader.
+                # Success already drained the queue before the child was joined.
+                queue.cancel_join_thread()
+                queue.close()
     spec = layout.spec
     (path / "ATTRIBUTION.txt").write_text(_attribution(spec.board))
     covered = union_all([p.footprint for p in layout.panels])

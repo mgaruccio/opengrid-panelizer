@@ -43,9 +43,12 @@ Output directories must be new or empty. `generate` refuses the draft example;
 do not mark a real installation ready until its geometry and keepouts have been
 measured. The examples are synthetic, not claims about any particular desk.
 
-`generate` defaults to up to four fresh-process panel builds at a time (bounded
-by CPU count). Use `--jobs 2` to choose concurrency, or `--jobs 1` for the original
-serial, in-process path. Output ordering and geometry are unchanged. The Python
+`generate` defaults to up to four fresh processes at a time (bounded by CPU count).
+Each process builds one panel and writes its print STEP/STL, with OCCT threads
+bounded to its share of the available CPUs. Assembly export overlaps the builds;
+connector checks use bounded batches of exact solid intersections. Use `--jobs 2`
+to choose concurrency, or `--jobs 1` for the original serial, in-process path.
+Output ordering, geometry, and STEP precision are unchanged. The Python
 `export_layout(layout, output, jobs=1)` API stays serial by default; when opting
 into `jobs > 1`, call it from an importable script guarded by
 `if __name__ == "__main__":` as required by multiprocessing spawn.

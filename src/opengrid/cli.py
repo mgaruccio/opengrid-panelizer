@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--jobs",
                 type=_positive_jobs,
                 default=min(4, os.cpu_count() or 1),
-                help="Parallel fresh-process panel builds (default: up to 4 CPUs; 1: in-process)",
+                help="Parallel fresh-process panel builds and print exports (default: up to 4 CPUs; 1: in-process)",
             )
     args = parser.parse_args(argv)
     try:
