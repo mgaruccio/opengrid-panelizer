@@ -7,7 +7,15 @@ from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
 
 PITCH = 28.0
-THICKNESS = 4.0
+THICKNESS = 4.0  # Retained Lite API; use board_thickness for a selected family.
+
+
+def board_thickness(board: str) -> float:
+    if board == "lite":
+        return THICKNESS
+    if board == "full":
+        return 6.8
+    raise ValueError("board must be lite or full")
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,7 @@ class InstallationSpec:
         default_factory=lambda: {"origin": "rear_left", "x": "right", "y": "front"}
     )
     source: dict[str, Any] = field(default_factory=lambda: {"kind": "explicit_geometry"})
+    board: str = "lite"
 
 
 @dataclass(frozen=True)
@@ -109,6 +118,7 @@ class Panel:
     base_footprint: Polygon | None = None
     edges: tuple["EdgeInterface", ...] = ()
     grid_row: int | None = None  # Global brick row, retained through partition fragmentation.
+    board: str = "lite"
 
 
 @dataclass(frozen=True)

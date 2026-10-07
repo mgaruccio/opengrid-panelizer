@@ -42,7 +42,7 @@ def test_precise_fixture_ready_and_provenance_preserved():
     assert spec.surface.contains(Point(84, 84))
 
 
-@pytest.mark.parametrize("field,value", [("units", "inch"), ("board", "full"), ("oops", 1)])
+@pytest.mark.parametrize("field,value", [("units", "inch"), ("board", "unknown"), ("oops", 1)])
 def test_explicit_units_board_and_unknown_fields(field, value):
     raw = document()
     raw["installation"][field] = value

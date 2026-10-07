@@ -113,6 +113,11 @@ def _valid_geometry(g: BaseGeometry, name: str) -> None:
 
 def validate_spec(spec: InstallationSpec) -> None:
     _valid_geometry(spec.surface, "surface")
+    if spec.board not in ("lite", "full"):
+        raise SpecError("board must be lite or full")
+    if spec.board == "full" and spec.joints.style == "under_desk":
+        raise SpecError("board: full does not support the Lite-only under_desk spring clip; "
+                        "use under_desk_puzzle, wall, puzzle or none")
     if not isinstance(spec.id, str) or not spec.id or spec.status not in {"draft", "ready"}:
         raise SpecError("Installation needs an id and status draft or ready")
     if spec.coordinate_system != {"origin": "rear_left", "x": "right", "y": "front"}:
@@ -209,8 +214,8 @@ def from_dict(document: Any) -> InstallationSpec:
         },
         "installation",
     )
-    if raw.get("units") != "mm" or raw.get("board", "lite") != "lite":
-        raise SpecError("This generator requires units: mm and board: lite")
+    if raw.get("units") != "mm":
+        raise SpecError("This generator requires units: mm")
     try:
         keepouts = []
         for item in raw.get("keepouts", []):
@@ -263,6 +268,7 @@ def from_dict(document: Any) -> InstallationSpec:
             metadata=_mapping(raw.get("metadata", {}), "metadata"),
             source=_mapping(raw.get("source", {"kind": "explicit_geometry"}), "source"),
             coordinate_system=coordinates,
+            board=raw.get("board", "lite"),
         )
         json.dumps(
             {

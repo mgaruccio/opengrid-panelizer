@@ -1,7 +1,8 @@
 # openGrid Panelizer
 
-Turn a measured surface and keepouts into printer-sized **openGrid Lite** panels,
-with native accessory sockets, mounting holes, and optional inter-panel joints.
+Turn a measured surface and keepouts into printer-sized **openGrid Lite or Full**
+panels, with native accessory sockets and optional inter-panel joints.
+Lite includes native screw holes; Full uses separate native mounting tiles/snaps.
 
 **Experimental mechanical designs.** Automated geometry and assembly checks do
 not establish printed fit, sustained load capacity, or a safe screw count. Print
@@ -10,8 +11,8 @@ This is an independent project, not an official openGrid generator.
 
 ## What it does
 
-- Uses the native **28 mm pitch and 4 mm thickness** of openGrid Lite.
-- Preserves complete native socket cavities and the native mounting-hole profile.
+- Uses native **28 mm pitch**, **4 mm Lite** or **6.8 mm Full** thickness.
+- Preserves each family's complete native socket cavities (Full is not thickened Lite).
 - Handles polygonal surfaces, keepouts, printer-bed limits and excluded bed areas.
 - Exports individual STEP/STL panels, assembly STEP/SVG/PDF and a JSON manifest.
 - Offers puzzle joints, mounting-side support lips, and experimental clip joints.
@@ -42,6 +43,19 @@ Output directories must be new or empty. `generate` refuses the draft example;
 do not mark a real installation ready until its geometry and keepouts have been
 measured. The examples are synthetic, not claims about any particular desk.
 
+## Board selection
+
+Set `installation.board: full` in YAML/JSON, or pass `board="full"` to
+`opengrid.generate_installation(...)`. Omit it (or use `lite`) for unchanged Lite
+behavior. Full uses the official 6.8 mm socket geometry and **no integrated screw
+holes**. Arrange and verify separate native Full mounting tiles/snaps on **every
+panel**; tiles/snaps are not generated or positioned here. Full under-desk puzzle
+manifests do not approve indirect-only support and list tile verification as a
+mounting blocker for each panel. Attachment engineering remains user-handled.
+
+Full supports `none`, `puzzle`, `wall`, and `under_desk_puzzle`. The experimental
+`under_desk` spring clip is Lite-only; Full rejects that combination.
+
 ## Joint choices
 
 | `joints.style` | Interface | Assembly |
@@ -52,10 +66,11 @@ measured. The examples are synthetic, not claims about any particular desk.
 | `under_desk` | Experimental spring clips with captured lips | Join within rows, then slide complete rows together |
 | `none` | No inter-panel connectors | Independently mount panels |
 
-All styles retain the native 4 mm envelope. **Z=0 is the mounting/print-bed face;
-Z=4 is the accessory face and screw-head recess side.** Do not flip native socket
-geometry to reverse a lip. Supporting lips may be omitted where there is
-insufficient safe stock; read the manifest warnings.
+Supported styles retain the selected family's native envelope. **Z=0 is the
+mounting/print-bed face; Z=4 (Lite) or Z=6.8 (Full) is the accessory face.** Lite
+screw-head recesses open at Z=4. Mounting-side lips stay at Z=0.1–1.9 for both
+families; do not flip socket geometry to reverse a lip. Supporting lips may be
+omitted where there is insufficient safe stock; read the manifest warnings.
 
 For the puzzle-and-lip under-desk prototype:
 
@@ -65,8 +80,8 @@ uv run opengrid generate --spec examples/under-desk-puzzle.yaml --output verific
 
 Read its generated `ASSEMBLY.md` and `manifest.json`. Build the entire board before
 mounting: infill rows first, then lower the anchor rows onto their tongues. Keep
-all accessory faces aligned. The manifest identifies direct-fastening panels and
-**indirect-support candidates**, not a safe number of screws. A candidate must
+all accessory faces aligned. For Lite, the manifest identifies direct-fastening
+panels and **indirect-support candidates**, not a safe number of screws. A candidate must
 have actual north **and** south support lips into locally fastened panels with
 native holes. Boundaries, fragmented panels and incomplete support paths require
 direct fastening; missing native mounting holes are explicit blockers.
@@ -96,9 +111,9 @@ keepouts, then preview before generating. `examples/irregular.yaml` demonstrates
 an irregular boundary and keepouts. All dimensions are millimetres.
 
 Each export includes an `ATTRIBUTION.txt`; keep it with redistributed CAD files.
-The manifest records panels, native mounting holes, joint/lip ownership, print
-placements, coverage and warnings. Complete interior mounting nodes follow the
-native 56 mm pattern; clipped or split holes are omitted. Hardware selection and
+The manifest records panels, native Lite mounting holes, joint/lip ownership, print
+placements, coverage and warnings. Complete interior Lite mounting nodes follow
+the native 56 mm pattern; clipped or split holes are omitted. Hardware selection and
 attachment engineering remain the installer's responsibility.
 
 The Python entry point `opengrid.generate_installation(...)` returns a layout;
@@ -128,7 +143,7 @@ representative sustained loads before relying on a reduced-fastener layout.
 
 - Original software: **MIT** ([LICENSE](LICENSE)).
 - Native/derived CAD and generated panel designs: **CC BY 4.0**; credit
-  **David D / openGrid Lite** and retain the generated attribution.
+  **David D / openGrid Lite or Full** and retain the generated attribution.
 - [GridFlock](https://github.com/yawkat/GridFlock) inspired the puzzle-segmentation
   approach; it is not bundled or required.
 

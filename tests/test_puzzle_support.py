@@ -173,8 +173,8 @@ def common_volume(a, b):
     return properties.Mass()
 
 
-def assert_lowering_clear(moving, stationary):
-    """Exact continuous +4.1 -> 0 Z sweep, not sampled poses or clipped solids.
+def assert_lowering_clear(moving, stationary, travel=4.1):
+    """Exact continuous +travel -> 0 Z sweep, not sampled poses or clipped solids.
 
     Sweeping every boundary face plus the initial solid covers the full rigid
     swept body. Bounding boxes only reject disjoint faces; nothing is clipped.
@@ -194,7 +194,7 @@ def assert_lowering_clear(moving, stationary):
             continue
         if face.geom_type == GeomType.PLANE and abs(face.normal_at().Z) < 1e-8:
             continue
-        prism = BRepPrimAPI_MakePrism(face.wrapped, gp_Vec(0, 0, 4.1))
+        prism = BRepPrimAPI_MakePrism(face.wrapped, gp_Vec(0, 0, travel))
         assert prism.IsDone() and not prism.Shape().IsNull()
         swept = Compound(prism.Shape())
         assert swept.is_valid

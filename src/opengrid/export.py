@@ -10,7 +10,7 @@ from shapely.geometry import mapping
 from shapely.strtree import STRtree
 
 from .drawings import write_pdf, write_svg
-from .models import PITCH, THICKNESS, Layout
+from .models import PITCH, THICKNESS, Layout, board_thickness
 from .native import mounting_holes
 from .spec import SpecError, ensure_ready
 from .underdesk import ASSEMBLY_TRAVEL
@@ -18,7 +18,17 @@ from .underdesk import ASSEMBLY_TRAVEL
 NATIVE_SOURCE = (
     "https://www.printables.com/model/1214361-opengrid-walldesk-mounting-framework-and-ecosystem"
 )
-ATTRIBUTION = """Native openGrid Lite accessory and screw-hole geometry is derived from David D's openGrid,
+
+
+def _attribution(board: str) -> str:
+    family = "Full" if board == "full" else "Lite"
+    geometry = "accessory" if board == "full" else "accessory and screw-hole"
+    mounting = (
+        "Full uses separate native mounting tiles/snaps; no integrated screw holes are added."
+        if board == "full" else
+        "The native screw-hole profile is reflected to open its head recess at Z=4."
+    )
+    return f"""Native openGrid {family} {geometry} geometry is derived from David D's openGrid,
 licensed CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
 Source: https://www.printables.com/model/1214361-opengrid-walldesk-mounting-framework-and-ecosystem
 Panel design contributions: mgaruccio / openGrid Panelizer, CC BY 4.0.
@@ -26,10 +36,13 @@ Project: https://github.com/mgaruccio/opengrid-panelizer
 Compiler software is separately MIT licensed; native and generated CAD retain CC BY 4.0.
 Changes: custom installation outlines, panelization, and adapted puzzle joints;
 these joints are not an official openGrid board-to-board interface.
-The native screw-hole profile is reflected to open its head recess at Z=4.
+{mounting}
 No endorsement by the source author is implied. Physical print fit remains
 unverified until a coupon is printed and checked with the intended accessories.
 """
+
+
+ATTRIBUTION = _attribution("lite")  # Retain the existing Lite attribution constant.
 
 
 def prepare_output(path: Path) -> None:
@@ -74,6 +87,16 @@ def _puzzle_support(layout: Layout) -> dict:
     for panel in panels.values():
         row = panel.grid_row
         supports = {"north": [], "south": []}  # +Y / -Y, in installation coordinates.
+        if layout.spec.board == "full":
+            records.append({
+                "panel": panel.id, "grid_row": row, "role": "infill" if row % 2 else "anchor",
+                "fastening": "native_tiles_required", "supporting_lips": supports,
+                "direct_reasons": [("Full requires native mounting tiles/snaps on every panel; "
+                                    "indirect-only support is not approved")],
+            })
+            blockers.append(f"{panel.id}: user must arrange and verify native Full mounting tiles/snaps; "
+                            "tile placement and attachment are not verified by this generator")
+            continue
         for edge in panel.edges:
             if edge.male_panel != panel.id or edge.angle not in (90, 270):
                 continue
@@ -109,9 +132,11 @@ def _puzzle_support(layout: Layout) -> dict:
     steps = []
     def step(action, instruction, **data):
         steps.append({"number": len(steps) + 1, "action": action, **data, "instruction": instruction})
+    thickness = board_thickness(layout.spec.board)
     step("prepare", "Preassemble the entire board away from the desk. Z=0 is the mounting face; "
-         "Z=4 is the accessory face. Keep all parts in this pose; do not mirror or flex them. "
-         "Do not screw anchor rows to the desk first.")
+         f"Z={thickness:g} is the accessory face. Keep all parts in this pose; do not mirror or flex them. "
+         + ("Do not fasten anchor rows to the desk first." if layout.spec.board == "full" else
+            "Do not screw anchor rows to the desk first."))
     for row in order:
         ids = [p.id for p in rows[row]]
         step("build_row", f"Build row {row} west-to-east: {', '.join(ids)}. "
@@ -130,18 +155,33 @@ def _puzzle_support(layout: Layout) -> dict:
                  f"onto adjacent infill panels {', '.join(neighbours) or '(none)'}. "
                  "Keep the complete row rigid and aligned; do not insert a final panel diagonally.",
                  grid_row=row, panels=ids, adjacent_infill_panels=neighbours)
-    direct = [r["panel"] for r in records if r["fastening"] == "direct_required"]
-    step("mount", f"Only after full-board preassembly, mount anchors and exceptions: {', '.join(direct)}. "
-         "Use their existing native mounting holes listed in panels; never drill sockets. "
-         "Stop if a mounting blocker is listed. Support all panels during handling and installation.",
-         panels=direct)
+    direct = [r["panel"] for r in records if r["fastening"] != "indirect_support_candidate"]
+    if layout.spec.board == "full":
+        step("mount", f"Only after full-board preassembly, mount every panel: {', '.join(direct)}. "
+             "Use separate native Full mounting tiles/snaps, never drill sockets or add Lite screw holes. "
+             "The user must arrange and verify suitable tile placement and attachment for each panel. "
+             "Resolve every listed mounting blocker before installation; support all panels during handling.",
+             panels=direct)
+        limitation = (
+            "Full requires native mounting tiles/snaps on every panel; indirect-only support is not approved. "
+            "Mounting tiles/snaps are not generated or positioned here. The user must arrange and verify them. "
+            "Lips and puzzle keys are not load-rated; physical fit, creep, substrate and load testing remain necessary."
+        )
+    else:
+        step("mount", f"Only after full-board preassembly, mount anchors and exceptions: {', '.join(direct)}. "
+             "Use their existing native mounting holes listed in panels; never drill sockets. "
+             "Stop if a mounting blocker is listed. Support all panels during handling and installation.",
+             panels=direct)
+        limitation = (
+            "Indirect support candidates are not load-rated or a safe/minimum screw count. "
+            "Native connectors primarily align; physical lip, creep, fastener, substrate and load "
+            "testing remain necessary. Add direct fastening as needed; reductions are not guaranteed."
+        )
     return {
-        "mounting_face_z_mm": 0, "accessory_face_z_mm": THICKNESS,
+        "mounting_face_z_mm": 0, "accessory_face_z_mm": thickness,
         "tongue_z_mm": [0.1, 1.9], "north": "+Y", "south": "-Y",
         "panels": records, "assembly_steps": steps, "mounting_blockers": blockers,
-        "limitation": "Indirect support candidates are not load-rated or a safe/minimum screw count. "
-                      "Native connectors primarily align; physical lip, creep, fastener, substrate and load "
-                      "testing remain necessary. Add direct fastening as needed; reductions are not guaranteed.",
+        "limitation": limitation,
     }
 
 
@@ -196,8 +236,8 @@ def export_layout(layout: Layout, output: str | Path) -> dict:
         raise SpecError("Assembly STEP export failed")
     write_svg(layout.spec, path / "assembly.svg", layout)
     write_pdf(layout.spec, path / "assembly.pdf", layout)
-    (path / "ATTRIBUTION.txt").write_text(ATTRIBUTION)
     spec = layout.spec
+    (path / "ATTRIBUTION.txt").write_text(_attribution(spec.board))
     covered = union_all([p.footprint for p in layout.panels])
     manifest = {
         "schema_version": 1,
@@ -205,6 +245,7 @@ def export_layout(layout: Layout, output: str | Path) -> dict:
             "id": spec.id,
             "status": spec.status,
             "units": "mm",
+            "board": spec.board,
             "coordinate_system": spec.coordinate_system,
             "grid_origin": list(spec.grid_origin),
             "source": spec.source,
@@ -224,16 +265,16 @@ def export_layout(layout: Layout, output: str | Path) -> dict:
             ],
         },
         "native_interface": {
-            "board": "lite",
+            "board": spec.board,
             "pitch_mm": PITCH,
-            "thickness_mm": THICKNESS,
-            "mounting_hole": {
+            "thickness_mm": board_thickness(spec.board),
+            **({"mounting_hole": {
                 "through_diameter_mm": 4.1,
                 "head_diameter_mm": 7.2,
                 "head_face_z_mm": THICKNESS,
                 "pattern_pitch_mm": 56,
                 "placement": "complete interior odd lattice nodes only; no split seam holes",
-            },
+            }} if spec.board == "lite" else {}),
             "source": NATIVE_SOURCE,
             "author": "David D",
             "license": "CC-BY-4.0",
@@ -292,7 +333,12 @@ def export_layout(layout: Layout, output: str | Path) -> dict:
             "physical_fit": "requires_coupon",
         },
         "warnings": layout.warnings,
-        "mounting": "native Lite screw holes included; screws and attachment user_handled",
+        "mounting": (
+            "native Full mounting tiles/snaps required on every panel; no integrated screw holes; "
+            "user must arrange and verify tile placement and attachment"
+            if spec.board == "full" else
+            "native Lite screw holes included; screws and attachment user_handled"
+        ),
     }
     if support is not None:
         manifest["puzzle_support"] = support

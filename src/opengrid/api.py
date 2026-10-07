@@ -16,6 +16,8 @@ def generate_installation(
     printer: PrinterSpec | None = None,
     joint_strategy: JointSpec | None = None,
     mounting_constraints: Mapping[str, Any] | None = None,
+    *,
+    board: str = "lite",
 ) -> Layout:
     """Plan printable panels from explicit mm geometry. Use export_layout for files.
 
@@ -39,5 +41,6 @@ def generate_installation(
             grid_origin=grid_origin,
             printer=printer or PrinterSpec(),
             joints=joint_strategy or JointSpec(),
+            board=board,
         )
     )

@@ -1,11 +1,11 @@
-"""CAD-independent native openGrid Lite geometry.
+"""CAD-independent native openGrid Lite and Full geometry.
 
 The compiler uses this module from layout and preview code, so it deliberately
-contains no build123d/OCC imports.  ``socket_projection`` is the conservative
-XY projection of the negative accessory cavity in the official 4 mm Lite
-profile.  The polygon is the convex hull of the cavity's measured STEP
-vertices at every Z plane, which keeps the widest lower and upper chamfers in
-keepout calculations.
+contains no build123d/OCC imports. ``socket_projection`` is the conservative
+XY projection shared by the official 4 mm Lite and 6.8 mm Full cavities.
+Their measured STEP vertices have the same 16-point convex hull over all Z
+planes, despite their different 3-D engagement profiles. Keeping the widest
+lower and upper chamfers is conservative for both families' keepouts.
 """
 
 from __future__ import annotations
@@ -70,7 +70,10 @@ def mounting_holes(panel: Panel) -> tuple[tuple[float, float], ...]:
     Odd lattice nodes match the official 2x2/4x4 Lite boards. Never split a
     mounting hole between panels or place one in an irregular edge/joint.
     Coordinates share the socket lattice phase, including negative origins.
+    Full uses separate native mounting tiles/snaps, never integrated screw holes.
     """
+    if panel.board == "full":
+        return ()
     cells = {(cell.ix, cell.iy): cell for cell in panel.cells}
     holes = []
     for (ix, iy), cell in sorted(cells.items()):

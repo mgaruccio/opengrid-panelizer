@@ -12,7 +12,7 @@ from .spec import SpecError, ensure_ready, load_spec
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Compile precise geometry into openGrid Lite panels"
+        description="Compile precise geometry into native openGrid Lite or Full panels"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (

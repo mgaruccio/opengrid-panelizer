@@ -273,7 +273,7 @@ def plan_installation(
         )
     )
     panels = [
-        Panel(f"P{i:03d}", polygon, panel_cells, placement,
+        Panel(f"P{i:03d}", polygon, panel_cells, placement, board=spec.board,
               grid_row=panel_cells[0].iy // chunk if spec.joints.style == "under_desk_puzzle" else None)
         for i, (polygon, panel_cells, placement) in enumerate(pieces, 1)
     ]

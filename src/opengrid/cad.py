@@ -1,9 +1,9 @@
-"""Native openGrid Lite CAD construction using build123d.
+"""Native openGrid Lite and Full CAD construction using build123d.
 
 The public functions keep the panel in installation XY with its bottom at Z=0.
-The native accessory and mounting-hole cutters are derived from official Lite
-STEP geometry; panel boundaries and adapted joint profiles remain owned by the
-caller's Shapely footprint.
+Accessory cavities are derived from the selected family's official STEP.
+Only Lite receives integrated mounting holes; panel boundaries and adapted
+joint profiles remain owned by the caller's Shapely footprint.
 """
 
 from __future__ import annotations
@@ -15,11 +15,12 @@ from pathlib import Path
 from build123d import Axis, Face, Location, Part, Plane, Solid, Wire, extrude, import_step
 from shapely.geometry import Polygon
 
-from .models import THICKNESS, Panel
+from .models import THICKNESS, Panel, board_thickness
 from .native import mounting_holes
 
 _NATIVE_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "native"
 SOCKET_CUTTER_ASSET = _NATIVE_ASSET_DIR / "lite4mm_socket_cutter.step"
+FULL_SOCKET_CUTTER_ASSET = _NATIVE_ASSET_DIR / "full6p8mm_socket_cutter.step"
 MOUNTING_CUTTER_ASSET = _NATIVE_ASSET_DIR / "lite4mm_mounting_cutter.step"
 
 
@@ -45,13 +46,14 @@ def _footprint_face(footprint: Polygon) -> Face:
     return Face(outer, holes) if holes else Face(outer)
 
 
-@lru_cache(maxsize=1)
-def _socket_cutter() -> Solid:
-    """Load and validate the exact 3-D native accessory cavity once."""
-
-    if not SOCKET_CUTTER_ASSET.is_file():
-        raise FileNotFoundError(f"native socket cutter asset is missing: {SOCKET_CUTTER_ASSET}")
-    imported = import_step(SOCKET_CUTTER_ASSET)
+@lru_cache(maxsize=2)
+def _socket_cutter(board: str = "lite") -> Solid:
+    """Load and validate the selected family's exact 3-D native cavity once."""
+    thickness = board_thickness(board)
+    asset = SOCKET_CUTTER_ASSET if board == "lite" else FULL_SOCKET_CUTTER_ASSET
+    if not asset.is_file():
+        raise FileNotFoundError(f"native socket cutter asset is missing: {asset}")
+    imported = import_step(asset)
     solids = imported.solids()
     if len(solids) != 1:
         raise RuntimeError("native socket cutter STEP must contain exactly one solid")
@@ -64,7 +66,7 @@ def _socket_cutter() -> Solid:
         or abs(bounds.min.Y + 13.2) > tolerance
         or abs(bounds.max.Y - 13.2) > tolerance
         or abs(bounds.min.Z) > tolerance
-        or abs(bounds.max.Z - THICKNESS) > tolerance
+        or abs(bounds.max.Z - thickness) > tolerance
     ):
         raise RuntimeError("native socket cutter has unexpected normalized bounds")
     if not cutter.is_valid:
@@ -136,19 +138,24 @@ def _apply_edge_lips(base, panel: Panel):
 
 
 def build_panel(panel: Panel):
-    """Build one native Lite panel in installation coordinates.
+    """Build one native panel in installation coordinates.
 
     ``panel.footprint`` supplies the complete outline, including any adapted
-    joint profiles.  Every listed cell receives the measured native 3-D
-    accessory cavity cutter. Complete interior nodes also receive the exact
-    native screw-hole cutter; hole selection avoids split/clipped seam holes.
-    Screw choice and wood attachment engineering remain user-handled.
+    joint profiles. Every cell receives its family's exact accessory cavity.
+    Lite's complete interior nodes also receive its native screw-hole cutter.
+    Full requires separate native mounting tiles/snaps, arranged by the user.
     """
+    thickness = board_thickness(panel.board)
+    if panel.board == "full" and (
+        any(j.spec.style == "under_desk" for j in panel.joints)
+        or any(e.style == "under_desk" for e in panel.edges)
+    ):
+        raise ValueError("board: full does not support the Lite-only under_desk spring clip")
 
     # Boolean operations commonly reverse Shapely ring winding. Extrusion must
     # use global +Z, not the face normal, so every socket cutter overlaps the slab.
     footprint = panel.base_footprint if panel.base_footprint is not None else panel.footprint
-    base = extrude(_footprint_face(footprint), amount=THICKNESS, dir=(0, 0, 1))
+    base = extrude(_footprint_face(footprint), amount=thickness, dir=(0, 0, 1))
     for joint in panel.joints:
         if joint.spec.style != "under_desk":
             continue
@@ -166,7 +173,7 @@ def build_panel(panel: Panel):
         if cut is not None:
             base = base.cut(posed(cut))
     base = _apply_edge_lips(base, panel)
-    cutter = _socket_cutter()
+    cutter = _socket_cutter(panel.board)
     cutters = [cutter.moved(Location((cell.x, cell.y, 0.0))) for cell in panel.cells]
     result = base.cut(*cutters) if cutters else base
     removed = base.volume - result.volume
@@ -183,8 +190,8 @@ def build_panel(panel: Panel):
         result = mounted
     validated = _single_volume(result, context=f"panel {panel.id!r}")
     bounds = validated.bounding_box()
-    if abs(bounds.min.Z) > 1e-6 or abs(bounds.max.Z - THICKNESS) > 1e-6:
-        raise RuntimeError(f"panel {panel.id!r} must have bottom Z=0 and top Z=4")
+    if abs(bounds.min.Z) > 1e-6 or abs(bounds.max.Z - thickness) > 1e-6:
+        raise RuntimeError(f"panel {panel.id!r} must have bottom Z=0 and top Z={thickness:g}")
     return Part([validated.solids()[0]])
 
 
