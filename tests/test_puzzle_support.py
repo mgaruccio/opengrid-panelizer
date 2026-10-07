@@ -201,12 +201,14 @@ def assert_lowering_clear(moving, stationary):
         assert abs(common_volume(swept, stationary)) < 1e-5
 
 
-@pytest.fixture(scope="module", params=["rows", "t-coupon", "irregular"])
+@pytest.fixture(scope="module", params=["rows", "t-coupon", "irregular", "t-zero", "t-max"])
 def public_output(request, tmp_path_factory):
     root = tmp_path_factory.mktemp(f"puzzle-{request.param}")
     document = yaml.safe_load(Path("examples/under-desk-puzzle.yaml").read_text())
-    if request.param == "t-coupon":
+    if request.param.startswith("t-"):
         document["installation"]["surface"].update(width=112, depth=168)
+    if request.param in {"t-zero", "t-max"}:
+        document["installation"]["joints"]["clearance"] = 0 if request.param == "t-zero" else 0.1
     if request.param == "irregular":
         document["installation"]["surface"].update(width=168, depth=336)
         document["installation"]["keepouts"] = [{"id": "notch", "geometry": {
@@ -319,3 +321,136 @@ def test_public_cli_draft_never_produces_printable_output(tmp_path):
                             timeout=20, check=False)
     assert result.returncode != 0
     assert not output.exists() or not list(output.iterdir())
+
+
+def t_nodes(layout):
+    from collections import defaultdict
+
+    nodes = defaultdict(list)
+    for joint in layout.joints:
+        nodes[joint.x, joint.y].append(joint)
+    return {xy: pair for xy, pair in nodes.items() if len(pair) == 2}
+
+
+@pytest.mark.parametrize("clearance", [0, 0.05, 0.1])
+def test_split_t_heads_stock_and_support_lips(clearance):
+    from shapely import union_all
+    from shapely.affinity import rotate, translate
+    from shapely.geometry import LineString
+
+    from opengrid.native import socket_projection
+
+    layout = rows(joints=JointSpec(style="under_desk_puzzle", clearance=clearance))
+    nodes = t_nodes(layout)
+    assert set(nodes) == {(x, y) for x in (56, 112, 168, 224, 280) for y in (112, 224)}
+    assert {j.angle for pair in nodes.values() for j in pair} == {90, 270}
+    panels = {p.id: p for p in layout.panels}
+    slots = union_all([socket_projection(c.x, c.y) for p in layout.panels for c in p.cells])
+    for (x, y), pair in nodes.items():
+        a, b = pair
+        assert a.female_panel == b.female_panel and a.male_panel != b.male_panel
+        assert a.reservation.equals(b.reservation)
+        whole, tool = puzzle_profiles(layout.spec.joints, x, y, a.angle)
+        assert union_all([a.male, b.male]).symmetric_difference(whole).area < 1e-8
+        assert union_all([a.female, b.female]).symmetric_difference(tool).area < 1e-8
+        assert a.male.intersection(b.male).area < 1e-8
+        assert tool.distance(slots) >= 1.0  # Measured minimum 1.054 mm at clearance .10.
+        assert not a.reservation.intersects(slots)
+        assert max(abs(px - x) + abs(py - y) for px, py in a.reservation.exterior.coords) < 5.85
+        for joint in pair:
+            local = rotate(translate(joint.male, -x, -y), -joint.angle, origin=(0, 0))
+            assert local.intersection(LineString([(0, -5), (0, 5)])).length == pytest.approx(1.7)
+            assert local.intersection(LineString([(1.7, -5), (1.7, 5)])).length == pytest.approx(2.3)
+            # The actual key plus its corner has a connected two-nozzle-line core.
+            material = panels[joint.male_panel].base_footprint.intersection(box(x-5, y-5, x+5, y+5))
+            core = material.buffer(-0.4)
+            assert core.geom_type == "Polygon" and not core.is_empty
+            assert core.intersects(joint.male.buffer(-0.4))
+            lips = [e for e in panels[joint.male_panel].edges
+                    if {e.male_panel, e.female_panel} == {joint.male_panel, joint.female_panel}]
+            assert sum(e.length for e in lips) > 40  # >40 mm on even the shortest 56 mm seam.
+    # Ordinary seam keys retain exactly the original profile and gender.
+    for joint in layout.joints:
+        if (joint.x, joint.y) not in nodes:
+            expected = puzzle_profiles(layout.spec.joints, joint.x, joint.y, joint.angle)
+            assert joint.male.equals(expected[0]) and joint.female.equals(expected[1])
+
+
+def test_t_keys_fail_closed_atomically_and_other_styles_unchanged():
+    from shapely.geometry import Point
+
+    spec = InstallationSpec("t", box(0, 0, 112, 168),
+                            printer=PrinterSpec(max_panel_span=112),
+                            joints=JointSpec(style="under_desk_puzzle"))
+    # A tiny defect in receiver stock (not a socket) must reject BOTH halves.
+    damaged = plan_installation(replace(spec, keepouts=(
+        Keepout("stock-defect", box(56.5, 108.5, 57, 109)),
+    )))
+    assert not t_nodes(damaged)
+    assert any("T-junction (56, 112): keys omitted" in w for w in damaged.warnings)
+    assert all(j.male.distance(Point(56, 112)) > 10 for j in damaged.joints)
+    for style in ("wall", "puzzle", "under_desk"):
+        assert not t_nodes(plan_installation(replace(spec, joints=JointSpec(style=style))))
+    custom = plan_installation(replace(spec, joints=replace(spec.joints, neck_width=3.2)))
+    assert not t_nodes(custom)
+    assert any("calibrated puzzle profile" in w for w in custom.warnings)
+
+
+def test_public_cli_each_t_corner_blocks_xy_but_not_z(public_output):
+    """Exercise exported solids, isolating the node from successful ordinary keys/lips."""
+    from math import hypot
+
+    from build123d import Axis, Compound, Plane, Solid, extrude, import_step
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common, BRepAlgoAPI_Cut
+
+    from opengrid.cad import _footprint_face
+
+    case, output, spec = public_output
+    layout = plan_installation(spec)
+    nodes = t_nodes(layout)
+    assert nodes
+    if case == "irregular":
+        assert (112, 112) not in nodes
+        assert any("T-junction (112, 112): keys omitted" in w for w in layout.warnings)
+    manifest = json.loads((output / "manifest.json").read_text())
+    shapes = {}
+    for panel in manifest["panels"]:
+        printed = import_step(output / panel["step"])
+        p = panel["print_placement"]
+        shapes[panel["id"]] = printed.translate((-p["x"], -p["y"], 0)).rotate(Axis.Z, -p["rotation"])
+    smallest_contact = float("inf")
+    for (x, y), pair in nodes.items():
+        # Window encloses the entire head, but stops before the nearest support
+        # lip (2.9+ mm away). Cropping only removes material, never invents contact.
+        window = Solid.make_box(5.2, 5.2, 4, Plane(origin=(x-2.6, y-2.6, 0)))
+        ids = [pair[0].male_panel, pair[1].male_panel, pair[0].female_panel]
+        local = {}
+        for panel in ids:
+            operation = BRepAlgoAPI_Common(shapes[panel].wrapped, window.wrapped)
+            assert operation.IsDone()
+            local[panel] = Compound(operation.Shape())
+            assert local[panel].is_valid and len(local[panel].solids()) == 1
+        for joint in pair:
+            corner = local[joint.male_panel]
+            fixed = [shape for panel, shape in local.items() if panel != joint.male_panel]
+            assert all(abs(common_volume(corner, shape)) < 1e-6 for shape in fixed)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                length = hypot(dx, dy)
+                moved = corner.translate((0.3*dx/length, 0.3*dy/length, 0))
+                contact = sum(common_volume(moved, shape) for shape in fixed)
+                assert contact > 0.001, (case, x, y, joint.male_panel, dx, dy)
+                smallest_contact = min(smallest_contact, contact)
+            for dz in (-0.3, 0.3):
+                assert all(abs(common_volume(corner.translate((0, 0, dz)), shape)) < 1e-6
+                           for shape in fixed)  # No invented standalone Z lock.
+            # Remove the actual half-key: its withdrawal contact must disappear.
+            key = extrude(_footprint_face(joint.male), amount=4, dir=(0, 0, 1))
+            operation = BRepAlgoAPI_Cut(corner.wrapped, key.wrapped)
+            assert operation.IsDone()
+            removed = Compound(operation.Shape())
+            withdrawal = (0, -0.3 if joint.angle == 90 else 0.3, 0)
+            assert sum(common_volume(removed.translate(withdrawal), shape) for shape in fixed) < 1e-6
+            assert sum(common_volume(corner.translate(withdrawal), shape) for shape in fixed) > 0.001
+    print(f"{case}: {len(nodes)} T nodes; BOTH corners block all 8 XY directions at 0.3 mm; "
+          f"minimum local contact {smallest_contact:.6f} mm^3; removed-key controls clear; "
+          f"local +/-Z remain free: {output}", flush=True)

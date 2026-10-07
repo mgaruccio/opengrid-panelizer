@@ -296,7 +296,89 @@ def _add_structural_joints(panels, spec, usable, slots, place, projection_provid
                 f"Seam {first.id}/{second.id}: no safe {spec.joints.style} connector; "
                 "insufficient solid land, retained sockets or usable-bed space."
             )
+    if spec.joints.style == "under_desk_puzzle":
+        _add_puzzle_t_joints(panels, seams, joints, stock, spec, usable, slots, place, warnings)
     from .edges import add_edge_interfaces
 
     add_edge_interfaces(seams, joints, spec, usable, place, warnings)
     return joints, warnings
+
+
+def _add_puzzle_t_joints(panels, seams, joints, stock, spec, usable, slots, place, warnings):
+    """Atomically capture two split corners in one spanning-panel receiver.
+
+    Bisect the existing full-height puzzle profile longitudinally.
+    Each corner retains a 1.7 mm neck and an outward-facing shoulder. The
+    mating half blocks inward motion; the spanning pocket blocks withdrawal.
+    No Z catch is added: the existing row-directed supporting lips still apply.
+    Only complete horizontal brick-row T nodes and the calibrated profile are
+    eligible. Irregular/missing stock leaves all three panels unchanged.
+    """
+    preset = JointSpec(style="under_desk_puzzle", clearance=spec.joints.clearance)
+    if spec.joints != preset:
+        warnings.append("T-junction keys omitted: require the calibrated puzzle profile.")
+        return
+    male, female = puzzle_profiles(spec.joints)
+    reservation = female.buffer(1.0)
+    x0, y0, x1, y1 = reservation.bounds
+    right = reservation.intersection(box(0, y0, x1, y1))
+    quarters = [box(x0, y0, 0, 0), box(x0, 0, 0, y1)]
+    roots = [reservation.intersection(q) for q in quarters]
+    halves = [male.intersection(box(x0, lo, x1, hi)) for lo, hi in ((y0, 0), (0, y1))]
+    nodes = sorted({(x, y) for _, _, seam in seams
+                    for x, y, normal in _candidates(seam, spec.grid_origin) if normal == 90})
+    tree = STRtree([p.footprint for p in panels])
+    for x, y in nodes:
+        meeting = [panels[int(i)] for i in tree.query(Point(x, y), predicate="intersects")]
+        if len(meeting) != 3:
+            continue
+        accepted = False
+        for angle in (90, 270):
+            reserved = _pose(reservation, x, y, angle)
+            if (not usable.covers(reserved) or reserved.intersects(slots)
+                    or any(reserved.intersects(g) for g in stock)):
+                continue
+            receivers = [p for p in meeting if p.footprint.covers(_pose(right, x, y, angle))]
+            if len(receivers) != 1:
+                continue
+            receiver = receivers[0]
+            owners = [[p for p in meeting if p is not receiver
+                       and p.footprint.covers(_pose(root, x, y, angle))] for root in roots]
+            if any(len(group) != 1 for group in owners):
+                continue
+            corners = [group[0] for group in owners]
+            if (corners[0] is corners[1] or receiver.grid_row is None
+                    or corners[0].grid_row != corners[1].grid_row
+                    or corners[0].grid_row is None
+                    or abs(corners[0].grid_row - receiver.grid_row) != 1):
+                continue
+            keys = [_pose(half, x, y, angle) for half in halves]
+            cuts = [_pose(half.buffer(spec.joints.clearance), x, y, angle) for half in halves]
+            changed = [p.footprint.union(key) for p, key in zip(corners, keys)]
+            changed.append(receiver.footprint.difference(union_all(cuts)))
+            if not all(single_material(g, slots) and usable.covers(g) for g in changed):
+                continue
+            if any(changed[i].intersection(changed[j]).area > 1e-7
+                   for i in range(3) for j in range(i + 1, 3)):
+                continue
+            placements = [place(g) for g in changed]
+            if any(p is None for p in placements):
+                continue
+            # Commit both halves together, including their shared stock reservation.
+            for panel, outline, placement in zip([*corners, receiver], changed, placements):
+                panel.footprint, panel.placement = outline, placement
+            for corner, key, cut in zip(corners, keys, cuts):
+                joint = Joint(f"J{len(joints) + 1:03d}", corner.id, receiver.id, x, y,
+                              angle, key, cut, spec.joints, reserved)
+                corner.joints += (joint,)
+                receiver.joints += (joint,)
+                joints.append(joint)
+            stock.append(reserved)
+            warnings.append(f"T-junction ({x:g}, {y:g}): two integral half-keys captured by "
+                            f"{receiver.id}; assemble the split row first. No independent Z lock "
+                            "or strength rating; retain supporting lips and test physical fit.")
+            accepted = True
+            break
+        if not accepted:
+            warnings.append(f"T-junction ({x:g}, {y:g}): keys omitted; insufficient complete "
+                            "corner/receiver stock, native socket clearance or usable-bed space.")

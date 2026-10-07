@@ -71,6 +71,13 @@ have actual north **and** south support lips into locally fastened panels with
 native holes. Boundaries, fragmented panels and incomplete support paths require
 direct fastening; missing native mounting holes are explicit blockers.
 
+With the default `under_desk_puzzle` profile, complete T-junctions have two
+integral half-heads captured by the spanning panel. Each corner has a 1.7 mm
+neck; preassemble the split row before seating it against the spanning row,
+following the same infill/anchor sequence. These keys restrain XY, not Z: keep
+the supporting lips and mounting constraints. Missing corner/receiver stock or
+custom profile dimensions omit both halves with a warning; no loose key is used.
+
 The example's candidate selection is a conservative row-layout heuristic—not
 structural optimization or proof against tipping, creep, or fastener pullout.
 Whole-board preassembly is allowed; inserting infill after fixing both adjacent
