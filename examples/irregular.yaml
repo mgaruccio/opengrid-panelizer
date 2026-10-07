@@ -1,0 +1,28 @@
+# Explicit synthetic geometry for exercising the real compiler. NOT a desk model.
+schema_version: 1
+installation:
+  id: irregular-compiler-fixture
+  status: ready
+  units: mm
+  board: lite
+  surface:
+    type: polygon
+    points: [[0, 0], [308, 0], [308, 112], [180, 112], [150, 168], [0, 168]]
+  grid_origin: [0, 0]
+  source: {kind: explicit_geometry, description: Synthetic concave fixture, not inferred physical dimensions.}
+  keepouts:
+    - id: round-obstruction
+      geometry: {type: circle, x: 84, y: 84, radius: 12}
+      clearance: 4
+      uncertainty: 0
+      confidence: 1
+      source: {kind: explicit_geometry, description: Precisely defined synthetic keepout.}
+  printer:
+    name: bambu_p1s
+    width: 256
+    depth: 256
+    max_panel_span: 224
+    margin: 0.5
+    exclusions:
+      - {type: rectangle, x: 0, y: 0, width: 18, depth: 28}
+  joints: {style: puzzle, depth: 1.5, neck_width: 1.2, head_width: 2.4, clearance: 0.15}

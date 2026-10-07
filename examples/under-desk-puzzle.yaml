@@ -1,0 +1,20 @@
+# Three brick-staggered rows; full-board preassembly before mounting.
+# This is a geometry/fit example, NOT a rated installation or minimum screw count.
+schema_version: 1
+installation:
+  id: under-desk-puzzle
+  status: ready
+  units: mm
+  board: lite
+  surface: {type: rectangle, x: 0, y: 0, width: 336, depth: 336}
+  grid_origin: [0, 0]
+  source: {kind: explicit_geometry, description: Puzzle support-row geometry example; physical load testing required.}
+  printer:
+    name: bambu_p1s
+    width: 256
+    depth: 256
+    margin: 0.5
+    max_panel_span: 112
+    exclusions:
+      - {type: rectangle, x: 0, y: 0, width: 18, depth: 28}
+  joints: {style: under_desk_puzzle, clearance: 0.05}

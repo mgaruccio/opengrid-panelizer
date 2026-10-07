@@ -1,0 +1,22 @@
+# Experimental clip pair: two 4x2-cell panels, sharing a 112 mm seam.
+# Phasing the 4-cell partition boundary through Y=56 makes the mating pair
+# while keeping the example's printer-bed dimensions and all native sockets.
+# Print flat, push together across the seam, and test retention before loading.
+schema_version: 1
+installation:
+  id: under-desk-wide-fit-coupon
+  status: ready
+  units: mm
+  board: lite
+  surface: {type: rectangle, x: 0, y: 0, width: 112, depth: 112}
+  grid_origin: [0, -56]
+  source: {kind: explicit_geometry, description: Final wider under-desk clip trial; not load rated.}
+  printer:
+    name: bambu_p1s
+    width: 256
+    depth: 256
+    margin: 0.5
+    max_panel_span: 112
+    exclusions:
+      - {type: rectangle, x: 0, y: 0, width: 18, depth: 28}
+  joints: {style: under_desk, clearance: 0.00}

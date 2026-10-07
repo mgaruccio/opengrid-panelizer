@@ -1,0 +1,30 @@
+# Synthetic unresolved installation for preview and export-refusal examples.
+schema_version: 1
+installation:
+  id: synthetic-draft-desk
+  status: draft
+  units: mm
+  board: lite
+  coordinate_system: {origin: rear_left, x: right, y: front}
+  surface: {type: rectangle, x: 0, y: 0, width: 1200, depth: 600}
+  grid_origin: [0, 0]
+  source:
+    kind: explicit_geometry
+    description: Synthetic dimensions for documentation and tests, not a measured installation.
+  keepouts: []
+  unresolved:
+    - Installed frame and bracket footprints must be measured.
+    - Controller, accessory and cable/service keepouts must be measured.
+  printer:
+    name: example_256mm_printer
+    width: 256
+    depth: 256
+    margin: 0.5
+    max_panel_span: 224
+    exclusions:
+      - {type: rectangle, x: 0, y: 0, width: 18, depth: 28}
+  joints: {style: puzzle}
+  metadata:
+    desktop_thickness: 25
+    desktop_material: unspecified
+    mounting: user_handled

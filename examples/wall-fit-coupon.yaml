@@ -1,0 +1,21 @@
+# Two small native Lite panels using the production reinforced wall connector.
+# Print flat; insert the male from below (+Z), or lower its receiver over it.
+# Clearance is per mating side; adjust it after a physical fit test.
+schema_version: 1
+installation:
+  id: wall-fit-coupon
+  status: ready
+  units: mm
+  board: lite
+  surface: {type: rectangle, x: 0, y: 0, width: 112, depth: 56}
+  grid_origin: [0, 0]
+  source: {kind: explicit_geometry, description: Wall connector mating pair; not a load-rated installation.}
+  printer:
+    name: bambu_p1s
+    width: 256
+    depth: 256
+    margin: 0.5
+    max_panel_span: 56
+    exclusions:
+      - {type: rectangle, x: 0, y: 0, width: 18, depth: 28}
+  joints: {style: wall, clearance: 0.05}

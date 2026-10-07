@@ -1,0 +1,21 @@
+# Two small native Lite panels using the production captured under-desk connector.
+# Print flat, then push together horizontally across the seam until the latch clicks.
+# Clearance is per mating side; physical cycling and fit still need testing.
+schema_version: 1
+installation:
+  id: under-desk-fit-coupon
+  status: ready
+  units: mm
+  board: lite
+  surface: {type: rectangle, x: 0, y: 0, width: 112, depth: 56}
+  grid_origin: [0, 0]
+  source: {kind: explicit_geometry, description: Under-desk captured connector mating pair; not load rated.}
+  printer:
+    name: bambu_p1s
+    width: 256
+    depth: 256
+    margin: 0.5
+    max_panel_span: 56
+    exclusions:
+      - {type: rectangle, x: 0, y: 0, width: 18, depth: 28}
+  joints: {style: under_desk, clearance: 0.00}
