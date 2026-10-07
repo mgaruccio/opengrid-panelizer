@@ -66,3 +66,33 @@ with four complete adjacent cells in the same panel and intact edge land.
 No half-holes are cut along seams, irregular edges or keepouts; adapted puzzle
 joints remain independent. This geometry does not specify wood screw suitability
 or establish mounting strength.
+
+
+## Native openGrid Full (6.8 mm)
+
+`openGrid_Full_2x2.step` and `openGrid_Full_4x4.step` are the separate official
+Full board models from the same David D publication and CC BY 4.0 licence above:
+
+- [Official Full 2x2 STEP](https://files.printables.com/media/prints/1214361/stls/9114185_003e310f-0311-43c7-b9e2-f84adcc08ebf_74f5395c-89ad-4159-87b8-607af959337b/opengrid-2x2.step)
+- [Official Full 4x4 STEP](https://files.printables.com/media/prints/1214361/stls/9114207_fce98296-75f1-49d3-a5ea-c4e41023ea98_cb0a1654-89e5-4cfa-97eb-6db3dbdcd743/opengrid-4x4.step)
+- [Official tile dimension drawing](https://makerworld.bblmw.com/makerworld/model/USc4ad1ec99528a7/design/2025-08-10_e49c64b993b288.pdf)
+
+Required attribution: **David D, openGrid Full, CC BY 4.0**.
+
+SHA-256:
+
+- `openGrid_Full_2x2.step`: `e69e5a035f577a65f95caec0078778d71b7765be48c1504b9cde486bea403c82`
+- `openGrid_Full_4x4.step`: `423a4588ec583d84ac5bbbed4c15b1c79db44d402394c593a2a62d13596932fe`
+- `full6p8mm_socket_cutter.step` (derived): `9a169e8944a9324c5d04af64ca9a00e08087d91d10235928c8e84ea2c2938bcc`
+
+The Full cutter is derived with the same box-subtraction procedure as Lite,
+but from a **28 x 28 x 6.8 mm** tile centred on **(1176, -1372)** in the Full
+4x4 source. Select the largest resulting solid and translate by
+`(-1176, 1372, 0)`. Its volume is 4108.003995374757 mm³; its bounds are
+±13.2 mm in XY and Z=0..6.8 mm (within CAD tolerance). An independent extraction
+from the Full 2x2 source at **(1400, -1596)** has zero Boolean difference in both
+directions. Full is not a scaled or thickened Lite cavity.
+
+Full uses native mounting tiles/snaps; no Lite mounting-hole cutter is derived
+or added for this board family. Perimeter alignment cutouts are not part of
+the socket cutter; custom panel joints remain separate from the native interface.
